@@ -1,0 +1,32 @@
+# Base44 dev image — system deps + Python deps baked in for fast startup.
+# Source is NOT copied here; it is bind-mounted at runtime via docker-compose.base44.yml.
+# This keeps every edit visible to the live-reload dev server.
+FROM python:3.14-slim
+
+# System deps (mirrors the production Dockerfile, minus gosu and Docker CLI
+# which are only needed for the production entrypoint / Cookbook host-Docker).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    curl \
+    git \
+    nodejs \
+    npm \
+    tmux \
+    openssh-client \
+    libgl1 \
+    libglib2.0-0t64 \
+    libxcb1 \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps for layer caching. On startup, compose re-runs
+# pip install to pick up any requirements.txt changes from the bind mount.
+COPY requirements.txt requirements-optional.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# python-magic needs the libmagic1 system lib (installed above); not in
+# requirements.txt to avoid breaking native installs without libmagic.
+RUN pip install --no-cache-dir python-magic==0.4.27

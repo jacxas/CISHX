@@ -1,0 +1,123 @@
+# Base44 dev-mode compose for Odysseus.
+# Runs the app FROM THE CLONED SOURCE (bind-mounted) with uvicorn --reload,
+# so edits appear live in the preview without image rebuilds.
+services:
+  odysseus:
+    build:
+      context: .
+      dockerfile: Dockerfile.base44-dev
+    ports:
+      - "3000:7000"
+    volumes:
+      # Bind-mount the entire repo so source edits are visible to --reload.
+      - ./:/app:z
+      # Named volumes for runtime data — keeps the repo clean.
+      - odysseus-data:/app/data:z
+      - odysseus-logs:/app/logs:z
+    environment:
+      # Auth disabled for dev preview convenience.
+      - AUTH_ENABLED=false
+      # CORS: allow the preview origin (same-origin app, but set for safety).
+      - ALLOWED_ORIGINS=https://3000-${BASE44_PUBLIC_HOST_SUFFIX},http://localhost:3000,http://localhost:7000
+      # Infra service addresses (in-network).
+      - SEARXNG_INSTANCE=http://searxng:8080
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8000
+      # SQLite database (persisted in the odysseus-data volume).
+      - DATABASE_URL=sqlite:///./data/app.db
+      - LOCALHOST_BYPASS=false
+      # Pre-seed admin so setup.py doesn't prompt (auth is disabled anyway).
+      - ODYSSEUS_ADMIN_USER=admin
+      - ODYSSEUS_ADMIN_PASSWORD=admin12345
+      - ODYSSEUS_SKIP_ADMIN_PROMPT=true
+      # LLM defaults — no external API keys needed to boot.
+      - LLM_HOST=localhost
+      - LLM_HOSTS=
+      - OPENAI_API_KEY=
+      - OLLAMA_BASE_URL=
+      - RESEARCH_LLM_ENDPOINT=
+      - EMBEDDING_URL=
+      - EMBEDDING_MODEL=
+      - EMBEDDING_API_KEY=
+      - FASTEMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      # In-process pollers/tasks.
+      - ODYSSEUS_INPROCESS_POLLERS=1
+      - ODYSSEUS_INPROCESS_TASKS=1
+    command:
+      - sh
+      - -ec
+      - |
+        pip install -r requirements.txt &&
+        python setup.py &&
+        exec uvicorn app:app --host 0.0.0.0 --port 7000 --reload --reload-exclude 'data/*' --reload-exclude 'logs/*'
+    depends_on:
+      searxng:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: on-failure
+
+  chromadb:
+    image: docker.io/chromadb/chroma:latest
+    volumes:
+      - chromadb-data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: on-failure
+
+  searxng:
+    image: docker.io/searxng/searxng:2026.5.31-7159b8aed
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -s /etc/searxng/settings.yml ] || grep -q 'odysseus-local-searxng-json-2026-05-30\|__SEARXNG_SECRET__' /etc/searxng/settings.yml; then
+          secret="$${SEARXNG_SECRET:-}"
+          if [ -z "$$secret" ]; then
+            secret="$$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          fi
+          sed "s|__SEARXNG_SECRET__|$$secret|g" /tmp/searxng-settings.yml.template > /etc/searxng/settings.yml
+        fi
+        exec /usr/local/searxng/entrypoint.sh
+    volumes:
+      - searxng-data:/etc/searxng
+      - ./config/searxng/settings.yml:/tmp/searxng-settings.yml.template:ro,z
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/', timeout=5).read(1)\""]
+      interval: 5s
+      timeout: 6s
+      retries: 20
+      start_period: 10s
+    restart: on-failure
+
+  ntfy:
+    image: docker.io/binwiederhier/ntfy
+    command: serve
+    volumes:
+      - ntfy-cache:/var/cache/ntfy
+    environment:
+      - NTFY_BASE_URL=http://ntfy:80
+    restart: on-failure
+
+volumes:
+  searxng-data:
+  chromadb-data:
+  ntfy-cache:
+  odysseus-data:
+  odysseus-logs:
